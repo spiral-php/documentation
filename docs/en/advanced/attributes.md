@@ -614,8 +614,7 @@ use Spiral\Attributes\Factory;
 
 $reader = (new Factory)
     ->withCache($cacheDriver)
-    ->create()
-;
+    ->create();
 
 // Where $cacheDriver is PSR-6 or PSR-16 cache driver implementation
 ```
