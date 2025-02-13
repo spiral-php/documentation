@@ -1,266 +1,222 @@
 # Container — IoC Scopes
 
-An essential aspect of developing long-living applications is proper context management. In demonized applications,
-you are no longer allowed to treat user requests as a global singleton object and store references to its instance in
-your services.
+Building long-lasting applications requires proper management of context. In many systems, you can no longer treat user requests as global singletons stored across services.
 
-Practically it means that you must explicitly request context while processing user input. Spiral offers a simple way to
-manage this by using a global IoC (Inversion of Control) container. This acts as a context carrier that allows you to
-request specific instances, scoped to a particular context, as if they were global objects.
+This means you need to explicitly request context when processing user input.
+Spiral provides an easy way to manage this using an IoC (Inversion of Control) container scopes.
 
-## How It Works
+Scopes allow you to create isolated contexts where you can redefine services and manage their lifecycle.
 
-When processing a user request, the relevant data for that request is placed in a scoped area of the IoC container. This
-data is only available for a limited time while processing that request.
+## How to Create an Isolated Scope
 
-You can use the `Spiral\Core\ContainerScopeInterface->runScoped` method to achieve this. The default Spiral
-container, `Spiral\Core\Container`, implements this interface.
+To create an isolated context, use the `Container::runScope()` method. The first argument is a `Scope` object that contains all the scope options, and the second is a function that will run inside this scope.
+The result of this function is returned by `runScope()`.
 
-**Here is an example**
+For example, you can redefine custom bindings to the scope by passing them in the `Scope` object:
 
 ```php
-use Psr\Container\ContainerInterface;
-
-$container->runScoped(
-    closure: function (ContainerInterface $container) {
-        dump($container->get(UserContext::class);
+$result = $container->runScope(
+    new Scope(bindings: [
+        LoggerInterface::class => FileLogger::class,
+    ]),
+    function () {
+        // Your code here
     },
-    bindings: [UserContext::class => $user,],
 );
 ```
 
-In this example, the `runScoped` method is creating a temporary scope within which the `UserContext` class is bound to
-the `$user` variable. The callback function can then use the container to retrieve the `UserContext` object instance,
-which is available within the callback's scope.
+In this example, the `LoggerInterface` will be resolved inside the scope as `FileLogger`.
 
-> **Note**
-> The framework ensures that the scope is cleaned up after execution, even if an exception is thrown.
 
-## Working with Container Scopes
+## How It Works
 
-Starting from version **3.8.0 of the Spiral Framework**, a new interface named `Spiral\Core\ContainerScopeInterface` has
-been introduced. This interface replaces the previous `Spiral\Core\ScopeInterface` and offers a more convenient and
-advanced way to work with scopes in the Inversion of Control (IoC) container.
+When you call `$container->runScope(new Scope(...), fn() => ...)`, a new container is created with its own bindings. The existing container becomes the parent of this new container.
 
-The Spiral Framework’s Container class now implements this interface. This means that when you are working with a
-Container instance in Spiral, you can make use of these new features directly through the container instance.
+The new container will be used inside the provided function and will be destroyed after the function completes.
 
-### Method Signature
+Important points:
+- Visibility: parent containers don’t know about their child containers. However, services in the parent container are accessible within children.
+- Scopes can be named or anonymous.
+    - The main global scope is always `root`.
+    - Named scopes must have unique names in a hierarchy to avoid conflicts.  
+      ![scopes-conflict](https://gist.github.com/user-attachments/assets/32f1ae89-9e35-4e7a-9e53-b3db15fee0ea)
+    - Parallel scopes with the same name (like in coroutines) can exist and will have their own hierarchies.
+- When exiting a scope, the associated container is destroyed.
 
-This interface allows you to run a specific block of code (a callable) within a uniquely defined and
-isolated scope of the IoC container. Here's how it works:
+### Dependency Resolution Order
 
-```php
-public function runScoped(callable $closure, array $bindings = [], ?string $name = null, bool $autowire = true): mixed
-```
+When resolving dependencies inside an isolated scope:
+1. The container first tries to find a binding in the current scope.
+2. If the binding is not found, the container tries to find it in the parent scope, and so on up to the root container.
+3. The instance is created in the scope where the binding was found. This means that dependencies for this instance are resolved within that same scope.
 
-**Parameters**
 
-- `$closure`: A callable that represents the block of code you want to run within the isolated scope.
-- `$bindings`: An optional array of key-value pairs that define specific bindings for this scope.
-- `$name`: An optional string that allows you to give a unique name to this scope.
-- `$autowire`: A boolean flag (default is `true`) that specifies whether or not dependencies should be automatically
-  resolved (autowired) or not.
+## Predefined Scopes
 
-The method returns the result of the passed callable.
+There are several predefined scopes in Spiral:
 
-### Basic Usage
+![spiral-scopes](https://gist.github.com/user-attachments/assets/aa12be0a-bea1-439c-a676-ef8d6158bda9)
 
-When you call the `runScoped` method, it executes the provided `$closure` (a callable, e.g., an anonymous function) in a
-separate, isolated scope. Any dependencies or bindings specified in the `$bindings` array will only be available within
-that specific scope.
+1. `root` — the main global scope. All other scopes are its children.
+2. Dispatcher Scope — a scope that opens when the corresponding [Dispatcher](../framework/dispatcher.md) is started:
+   `http`, `console`, `grpc`, `centrifugo`, `tcp`, `queue`, or `temporal`.
+3. Request Scope — a scope that opens before the controller is executed, when the request object is fully formed and ready for processing.
+   In the case of the HTTP dispatcher, middleware will be executed in the `http` scope, and interceptors in `http-request`.
 
-When `$autowire` is set to `true`, the IoC container will automatically resolve and inject all dependencies that the
-given `$closure` requires based on their type-hints.
+If you are sure that a service will only work within a specific dispatcher, it makes sense to use the corresponding scope.
+For example, HTTP middleware should be bound at the `http` scope level.
 
-**Here's an example**
+You can create your own scopes to isolate context and make only specific services available.
 
-```php
-$result = $container->runScoped(closure: function (SomeInterface $instance) {
-    // Your code here
-}, bindings: [SomeInterface::class => SomeImplementation::class]);
-```
+![http-scopes](https://gist.github.com/user-attachments/assets/a402f166-4396-40ec-a376-d2136fb25824)
 
-When `$autowire` is set to `false`, the container won't automatically resolve the `$closure`'s dependencies. Instead,
-the entire container instance itself will be passed as the first argument to the `$closure`. This way, you can manually
-fetch or manipulate the necessary dependencies from the container within the closure.
+## Configuring Bindings for Named Scopes
+
+You can preconfigure bindings specific to named scopes using the `BinderInterface::getBinder()` method.
+This allows you to set default bindings for a scope.
+
+Example:
 
 ```php
-$container->runScoped(closure: function (Contaner $container) {
-    $instance = $container->get(SomeInterface::class);
-    // Your code here
-}, bindings: [SomeInterface::class => SomeImplementation::class], autowire: false);
-```
-
-### Configuring Bindings for Named Scopes
-
-You have the option to pre-configure bindings specific to named scopes. There is `getBinder` method in the container
-which allows you to fetch a `BinderInterface` instance that is associated with a specific named scope. With this binder,
-you can set up default bindings for that scope.
-
-```php
-// Configure `root` scope bindings (the current instance)
 $container->bindSingleton(Interface::class, Implementation::class);
 
-// Configure `request` scope default bindings
-// Prefer way to make many bindings
+// Configure default bindings for 'request' scope
 $binder = $container->getBinder('request');
 $binder->bindSingleton(Interface::class, Implementation::class);
 $binder->bind(Interface::class, factory(...));
 ```
 
-#### Scope destroying
+> Note:
+> Bindings in a scope do not affect existing containers of that scope (except for `root`).
 
-Once a scope is finished (destroyed), all the dependencies (including singletons) that were initialized within that
-scope are also destroyed. This ensures clean and efficient resource management. The next time a scope with the same name
-is created, these bindings will be resolved anew, following the configurations you've set using the `BinderInterface`.
 
-#### Overriding Default Bindings
+## Overriding Default Bindings
 
-When you use the `Container::runScoped()` method to create a new scope, you can optionally pass the `$bindings` argument
-to override the default bindings for that specific scope.
+When using `Container::runScope()`, you can pass bindings to override defaults for a specific scope.
 
-- These custom bindings will take precedence within the newly created scope.
-- This won't affect the default bindings that you've previously defined for that named scope.
-
-**Example:**
+Example:
 
 ```php
 $container->bindSingleton(SomeInterface::class, SomeImplementation::class);
 
-$container->runScoped(closure: function ($container) {
-    $instance = $container->get(SomeInterface::class);
-    // Your code here
-}, bindings: [SomeInterface::class => AnotherImplementation::class], name: 'request');
+$container->runScope(
+    new Scope(
+        name: 'request',
+        bindings: [SomeInterface::class => AnotherImplementation::class],
+    ),
+    function () {
+        // Your code here
+    }
+);
 ```
 
-In this example, even though the `request` scope might have a default binding for `SomeInterface::class`, this specific
-run of the scope is using A`notherImplementation::class`.
+Here, even if the `request` scope has a default binding for `SomeInterface`, this specific run uses `AnotherImplementation`.
 
-### Scope Destroying
 
-When a dependency is resolved within a scope, and that scope is destroyed, the finalize method specified by this
-attribute will be called. The purpose of the finalize method is to perform any necessary cleanup or finalization actions
-before the scope is destroyed. In this case you can use `Finalize` attribute to control finalizing process. The
-attribute provides a convenient way to handle resource cleanup and ensure proper destruction of objects when a scope is
-no longer needed.
+## Scope Restrictions
+
+You can restrict where a dependency can be resolved using the `#[Scope('name')]` attribute.
+
+Example:
 
 ```php
-#[Finalize(method: 'finalize')]
-class Foo
-{
-    public bool $finalized = false;
+use Spiral\Boot\Environment\DebugMode;
+use Spiral\Core\Attribute\Scope;
+use Spiral\Core\Attribute\Singleton;
 
-    public function finalize(Logger $logger): void
+#[Singleton]
+#[Scope('http')]
+final readonly class DebugMiddleware implements \Psr\Http\Server\MiddlewareInterface
+{
+    public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
     {
-        $this->finalized = true;
-        $logger->log();
+        // ...
     }
 }
 ```
 
-### Naming a Scope
+Here, the `DebugMiddleware` can be instantiated only if the `http` scope exists in the scope hierarchy.
+Otherwise, an exception is thrown.
 
-You can optionally give a name to the scope with the `$name` parameter. This can be useful for tracking or managing
-specific scopes.
 
-**Restrictions**
+## Destroying Scopes and Finalization
 
-These restrictions ensure proper usage and prevent conflicts within the scope hierarchy. Here are the key restrictions:
+When exiting a scope, the associated container is destroyed.
+This means singletons created within the scope should be garbage collected, so avoid circular references.
 
-1. **Parallel Named Scopes:** Parallel named scopes are allowed.
-
-2. **Default Bindings for Named Scopes:** Named scopes can have default bindings associated with them. It's important to
-   note that changing of default bindings does not affect already created container instances with the same scope name,
-   except for the root container. Default bindings provide a convenient way to set up common dependencies for a
-   particular named scope.
-
-3. **Root Scope Name:** The most parent scope in the hierarchy is named the root scope by default. The root scope serves
-   as the top-level scope and provides the foundation for all other scopes. It's the starting point for dependency
-   resolution and can have its own set of default bindings.
-
-### Resolving Rules
-
-When a nested scope does not have its own bindings, it will now resolve dependencies from the parent scope.
-
-### Accessing Scoped Values
-
-You can access the values set in the scope directly from the container or via dependency injection in your services or
-controllers. However, this should only be done within the IoC scope.
-
-**Here's an example**
+If you need to perform cleanup actions when dependencies are resolved in a scope, use the `#[Finalize('methodName')]` attribute to specify a method that will be called when the scope is destroyed.
 
 ```php
-public function doSomething(UserContext $user): void
+#[Finalize('destroy')]
+class MyService
 {
-    \dump($user);
-}
-```
-
-In short, you can receive active context from container or injection inside the IoC scope as you would normally do
-for any normal dependency, but you **must not store** it between scopes.
-
-## Context Managers
-
-As mentioned above, you are not allowed to store any reference to the scoped instance, the following code is invalid and
-will cause the controller to lock on first scope value:
-
-```php Wrong approach
-class HomeController
-{
-    public function __construct(
-        private readonly UserContext $userContext // <====== !!!not allowed!!!
-    ) {
-    }
-    
-    public function index(): void
+    /**
+     * This method will be called before the scope is destroyed in case the service was resolved in this scope.
+     * Arguments will be resolved using the container.
+     */
+    public function destroy(LoggerInterface $logger): void
     {
-        dump($this->userContext);
+        // Clean up...
     }
 }
 ```
 
-Instead, it is recommended to use objects specifically crafted to provide access to IoC scopes from singletons - Context
-Managers. A simple context manager can be written as follows:
+
+## Proxy Objects
+
+Scopes are like nested containers, but there's more to them than simple delegation.
+
+What if you want to create a stateless service in the parent scope (`root` or `http`)
+that will handle `ServerRequestInterface` objects in the `http-request` scope?
+With nested containers, this is impossible because `ServerRequestInterface` is only available inside the `http-request` scope.
+Moreover, `ServerRequestInterface` will be different for each request.
+
+Spiral provides proxy objects that defer dependency resolution until it’s actually needed.
+
+Use the `#[Proxy]` attribute to create proxies for interfaces:
 
 ```php
-final class UserScope
+use Psr\Http\Message\ServerRequestInterface;
+use Spiral\Core\Attribute\Proxy;
+use Spiral\Core\Attribute\Singleton;
+
+#[Singleton]
+final readonly class DebugService
 {
     public function __construct(
-        private readonly ContainerInterface $container
-    ) {
-    }
+        #[Proxy] private ServerRequestInterface $request,
+    ) {}
 
-    public function getUserContext(): ?UserContext
+    public function hasDebugInfo(): bool
     {
-        // error checking is omitted
-        return $this->container->get(UserContext::class);
-    }
-
-    public function getName(): string
-    {
-        return $this->getUserContext()->getName();
+        return $this->request->hasHeader('X-Debug');
     }
 }
 ```
 
-You can use this manager in any of your services, including singletons.
+Important points:
+- Proxies are configured only for interfaces.
+- Each method call on a proxy will resolve the real object from the container.
+- Calling methods not defined in the interface is disallowed.
 
-```php app/src/Endpoint/Web/HomeController.php
-class HomeController implements SingletonInterface
-{
-    public function __construct(
-        private readonly UserScope $userManager
-    ) {
-    }
-}
+You can configure proxies for services that must only be available in specific scopes using the `Binder` class.
+For example, if the `AuthInterface` service must only be available in the `http` scope, you can use a proxy object for the `root` scope:
+
+```php
+// Configure a proxy for `AuthInterface` in the `root` scope
+$rootBinder = $container->getBinder('root');
+$rootBinder->bindSingleton(new \Spiral\Core\Config\Proxy(
+    AuthInterface::class,
+    singleton: true,
+    fallbackFactory: static fn() => throw new \LogicException(
+        'Unable to receive AuthInterface instance outside of `http` scope.'
+    ),
+));
+
+// Bind `AuthInterface` in the `http` scope
+$container->getBinder('http')
+    ->bindSingleton(AuthInterface::class, Auth::class);
 ```
 
-> **Note**
-> A good example is `Spiral\Http\Request\InputManager`. The manager operates as an accessor
-> to `Psr\Http\Message\ServerRequestInterface` available only inside http dispatcher scope.
-
-
-## Fibers support
-
-The container supports the creation of parallel independent scopes, which are safe to use with fibers.
+If a proxy is used outside the `http` scope, the `fallbackFactory` will be called to resolve the dependency.
+If the `fallbackFactory` is not provided, a `RecursiveProxyException` will be thrown.
